@@ -275,3 +275,6 @@ mean(abs(coef(res1) - res2$beta))
 ```
 ## [1] 4.384709e-07
 ```
+
+
+## Just to make sure I know how to push this up to github. 
