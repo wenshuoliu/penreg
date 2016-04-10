@@ -1,5 +1,6 @@
 
-#' Fitting A Lasso Model Using ADMM Algorithm
+
+#' Fitting A Lasso Model Using the Coordinate Descent Algorithm
 #' 
 #' @description Estimation of a linear model with the lasso penalty. The function
 #' \eqn{\beta} minimizes
@@ -7,11 +8,10 @@
 #' 1/(2n) * ||y - X * \beta||_2^2 + \lambda * ||\beta||_1}
 #' 
 #' where \eqn{n} is the sample size and \eqn{\lambda} is a tuning
-#' parameter that controls the sparseness of \eqn{\beta}.
+#' parameter that controls the sparsity of \eqn{\beta}.
 #' 
 #' @param x The design matrix
 #' @param y The response vector
-#' @param family "gaussian" for least squares problems, "binomial" for binary response
 #' @param intercept Whether to fit an intercept in the model. Default is \code{FALSE}. 
 #' @param standardize Whether to standardize the design matrix before
 #'                    fitting the model. Default is \code{FALSE}. Fitted coefficients
@@ -25,11 +25,11 @@
 #'                      \code{nlambda} values equally spaced in the log scale.
 #'                      It is recommended to set this parameter to be \code{NULL}
 #'                      (the default).
+#' @param penalty.factor a vector with length equal to the number of columns in x to be multiplied by lambda. by default
+#'                      it is a vector of 1s
 #' @param nlambda Number of values in the \eqn{\lambda} sequence. Only used
 #'                       when the program calculates its own \eqn{\lambda}
 #'                       (by setting \code{lambda = NULL}).
-#' @param penalty.factor a vector with length equal to the number of columns in x to be multiplied by lambda. by default
-#'                      it is a vector of 1s
 #' @param lambda_min_ratio Smallest value in the \eqn{\lambda} sequence
 #'                                as a fraction of \eqn{\lambda_0}. See
 #'                                the explanation of the \code{lambda}
@@ -39,15 +39,9 @@
 #'                                value is the same as \pkg{glmnet}: 0.0001 if
 #'                                \code{nrow(x) >= ncol(x)} and 0.01 otherwise.
 #' @param maxit Maximum number of admm iterations.
-#' @param abs.tol Absolute tolerance parameter.
+#' @param tol convergence tolerance parameter.
 #' @param rel.tol Relative tolerance parameter.
-#' @param irls.maxit integer. Maximum number of IRLS iterations. Only used if family != "gaussian". Default is 100.
-#' @param irls.tol convergence tolerance for IRLS iterations. Only used if family != "gaussian". Default is 10^{-5}.
-#' @param rho ADMM step size parameter. If set to \code{NULL}, the program
-#'                   will compute a default one which has good convergence properties.
 #' 
-#' @references 
-#' \url{http://stanford.edu/~boyd/admm.html}
 #' @examples set.seed(123)
 #' n = 1000
 #' p = 50
@@ -56,29 +50,22 @@
 #' y = drop(x %*% b) + rnorm(n)
 #' 
 #' ## fit lasso model with 100 tuning parameter values
-#' res <- admm.lasso(x, y)
+#' res <- cd.lasso(x, y)
 #' 
-#' # logistic
-#' y <- rbinom(n, 1, prob = 1 / (1 + exp(-x %*% b)))
-#' 
-#' bfit <- admm.lasso(x = x, y = y, family = "binomial")
 #' 
 #' @export
-admm.lasso <- function(x, 
-                       y, 
-                       lambda           = numeric(0), 
-                       nlambda          = 100L,
-                       lambda.min.ratio = NULL,
-                       family           = c("gaussian", "binomial"),
-                       penalty.factor   = NULL,
-                       intercept        = FALSE,
-                       standardize      = FALSE,
-                       maxit            = 5000L,
-                       abs.tol          = 1e-7,
-                       rel.tol          = 1e-7,
-                       rho              = NULL,
-                       irls.tol         = 1e-5, 
-                       irls.maxit       = 100L)
+cd.lasso <- function(x, 
+                     y, 
+                     lambda           = numeric(0), 
+                     penalty.factor,
+                     nlambda          = 100L,
+                     lambda.min.ratio = NULL,
+                     family           = c("gaussian", "binomial"),
+                     intercept        = FALSE,
+                     standardize      = FALSE,
+                     maxit            = 5000L,
+                     tol              = 1e-7
+)
 {
     n <- nrow(x)
     p <- ncol(x)
@@ -93,12 +80,12 @@ admm.lasso <- function(x,
         stop("number of rows in x not equal to length of y")
     }
     
-    if (is.null(penalty.factor)) {
-        penalty.factor <- rep(1, p)
-    }
-    
-    if (length(penalty.factor) != p) {
-        stop("penalty.factor must be of length equal to the number of columns in x")
+    if (missing(penalty.factor)) {
+        penalty.factor <- numeric(0)
+    } else {
+        if (length(penalty.factor) != p) {
+            stop("penalty.factor must be same length as number of columns in x")
+        }
     }
     
     lambda_val = sort(as.numeric(lambda), decreasing = TRUE)
@@ -135,39 +122,29 @@ admm.lasso <- function(x,
     {
         stop("maxit should be positive")
     }
-    if(abs.tol < 0 | rel.tol < 0)
+    if(tol < 0)
     {
-        stop("abs.tol and rel.tol should be nonnegative")
-    }
-    if(isTRUE(rho <= 0))
-    {
-        stop("rho should be positive")
+        stop("tol should be nonnegative")
     }
     
-    maxit      <- as.integer(maxit)
-    irls.maxit <- as.integer(irls.maxit)
-    irls.tol   <- as.numeric(irls.tol)
-    abs.tol    <- as.numeric(abs.tol)
-    abs.tol    <- as.numeric(abs.tol)
-    rel.tol    <- as.numeric(rel.tol)
-    rho        <- if(is.null(rho))  -1.0  else  as.numeric(rho)
+    maxit   <- as.integer(maxit)
+    tol <- as.numeric(tol)
     
-    res <- .Call("admm_lasso", 
-                 x, y, 
-                 family,
-                 lambda,
-                 nlambda, 
-                 lambda.min.ratio,
-                 penalty.factor,
-                 standardize, 
-                 intercept,
-                 list(maxit      = maxit,
-                      eps_abs    = abs.tol,
-                      eps_rel    = rel.tol,
-                      irls_maxit = irls.maxit,
-                      irls_tol   = irls.tol,
-                      rho        = rho),
-                 PACKAGE = "penreg")
+    if (family == "gaussian")
+    {
+        res <- .Call("coord_lasso", x, y, 
+                     lambda,
+                     penalty.factor,
+                     nlambda, 
+                     lambda.min.ratio,
+                     standardize, intercept,
+                     list(maxit = maxit,
+                          tol   = tol),
+                     PACKAGE = "penreg")
+    } else if (family == "binomial")
+    {
+        stop("Binomial not implemented yet")
+    }
+    class(res) <- "cd.lasso"
     res
 }
-

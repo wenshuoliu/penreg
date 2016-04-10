@@ -1,21 +1,17 @@
 
-#' Fitting A Lasso Model Using ADMM Algorithm
+#' Fitting A Generalized Lasso Model Using ADMM Algorithm
 #' 
-#' @description Estimation of a linear model with the lasso penalty. The function
+#' @description Estimation of a linear model with the generalized ridge and lasso penalties. The function
 #' \eqn{\beta} minimizes
 #' \deqn{\frac{1}{2n}\Vert y-X\beta\Vert_2^2+\lambda\Vert\beta\Vert_1}{
-#' 1/(2n) * ||y - X * \beta||_2^2 + \lambda * ||\beta||_1}
+#' 1/(2n) * ||y - X * \beta||_2^2 + \lambda * (1 - \alpha) * ||D\beta||^2 + \lambda * \alpha * ||\beta||_1}
 #' 
 #' where \eqn{n} is the sample size and \eqn{\lambda} is a tuning
 #' parameter that controls the sparseness of \eqn{\beta}.
 #' 
 #' @param x The design matrix
 #' @param y The response vector
-#' @param family "gaussian" for least squares problems, "binomial" for binary response
-#' @param intercept Whether to fit an intercept in the model. Default is \code{FALSE}. 
-#' @param standardize Whether to standardize the design matrix before
-#'                    fitting the model. Default is \code{FALSE}. Fitted coefficients
-#'                    are always returned on the original scale.
+#' @param D The specified penalty matrix 
 #' @param lambda A user provided sequence of \eqn{\lambda}. If set to
 #'                      \code{NULL}, the program will calculate its own sequence
 #'                      according to \code{nlambda} and \code{lambda_min_ratio},
@@ -25,11 +21,17 @@
 #'                      \code{nlambda} values equally spaced in the log scale.
 #'                      It is recommended to set this parameter to be \code{NULL}
 #'                      (the default).
+#' @param penalty.factor a vector with length equal to the number of columns in x to be multiplied by lambda. by default
+#'                      it is a vector of 1s
+#' @param intercept Whether to fit an intercept in the model. Default is \code{FALSE}. 
+#' @param standardize Whether to standardize the design matrix before
+#'                    fitting the model. Default is \code{FALSE}. Fitted coefficients
+#'                    are always returned on the original scale.
+#' @param alpha lasso / generalized ridge mixing parameter s.t. \eqn{0 \le \alpha \le 1}. 
+#'                      0 is generalized ridge, 1 is lasso. 
 #' @param nlambda Number of values in the \eqn{\lambda} sequence. Only used
 #'                       when the program calculates its own \eqn{\lambda}
 #'                       (by setting \code{lambda = NULL}).
-#' @param penalty.factor a vector with length equal to the number of columns in x to be multiplied by lambda. by default
-#'                      it is a vector of 1s
 #' @param lambda_min_ratio Smallest value in the \eqn{\lambda} sequence
 #'                                as a fraction of \eqn{\lambda_0}. See
 #'                                the explanation of the \code{lambda}
@@ -41,12 +43,9 @@
 #' @param maxit Maximum number of admm iterations.
 #' @param abs.tol Absolute tolerance parameter.
 #' @param rel.tol Relative tolerance parameter.
-#' @param irls.maxit integer. Maximum number of IRLS iterations. Only used if family != "gaussian". Default is 100.
-#' @param irls.tol convergence tolerance for IRLS iterations. Only used if family != "gaussian". Default is 10^{-5}.
 #' @param rho ADMM step size parameter. If set to \code{NULL}, the program
 #'                   will compute a default one which has good convergence properties.
-#' 
-#' @references 
+#' @references  
 #' \url{http://stanford.edu/~boyd/admm.html}
 #' @examples set.seed(123)
 #' n = 1000
@@ -55,50 +54,66 @@
 #' x = matrix(rnorm(n * p, sd = 3), n, p)
 #' y = drop(x %*% b) + rnorm(n)
 #' 
+#' D <- c(1, -1, rep(0, p - 2))
+#' for (i in 1:20) {D <- rbind(D, c(rep(0, 2 * i), 1, -1, rep(0, p - 2 - 2 * i)))}
+#' 
 #' ## fit lasso model with 100 tuning parameter values
-#' res <- admm.lasso(x, y)
+#' res <- admm.sparse.genridge(x, y, D = D, alpha = 0.5)
 #' 
-#' # logistic
-#' y <- rbinom(n, 1, prob = 1 / (1 + exp(-x %*% b)))
+#' @useDynLib penreg
 #' 
-#' bfit <- admm.lasso(x = x, y = y, family = "binomial")
+#' @import methods
+#' @import Rcpp
+#' @import ggplot2
+#' 
 #' 
 #' @export
-admm.lasso <- function(x, 
-                       y, 
-                       lambda           = numeric(0), 
-                       nlambda          = 100L,
-                       lambda.min.ratio = NULL,
-                       family           = c("gaussian", "binomial"),
-                       penalty.factor   = NULL,
-                       intercept        = FALSE,
-                       standardize      = FALSE,
-                       maxit            = 5000L,
-                       abs.tol          = 1e-7,
-                       rel.tol          = 1e-7,
-                       rho              = NULL,
-                       irls.tol         = 1e-5, 
-                       irls.maxit       = 100L)
+admm.sparse.genridge <- function(x, 
+                          y, 
+                          D                = NULL,
+                          lambda           = numeric(0), 
+                          penalty.factor,
+                          alpha            = 0.5,
+                          nlambda          = 100L,
+                          lambda.min.ratio = NULL,
+                          intercept        = FALSE,
+                          standardize      = FALSE,
+                          maxit            = 5000L,
+                          abs.tol          = 1e-7,
+                          rel.tol          = 1e-7,
+                          rho              = NULL
+                          )
 {
     n <- nrow(x)
     p <- ncol(x)
+    
+    if (is.null(lambda.min.ratio)) 
+    {
+        ifelse(n < p, 0.01, 0.0001)
+    }
+    
+    if (is.null(D)) {
+        warning("D is missing, defaulting to regular lasso")
+        D <- as(diag(p), "sparseMatrix")
+    } else {
+        D <- as(D, "sparseMatrix")
+    }
     
     x = as.matrix(x)
     y = as.numeric(y)
     intercept = as.logical(intercept)
     standardize = as.logical(standardize)
-    family <- match.arg(family)
     
     if (n != length(y)) {
         stop("number of rows in x not equal to length of y")
     }
     
-    if (is.null(penalty.factor)) {
-        penalty.factor <- rep(1, p)
-    }
-    
-    if (length(penalty.factor) != p) {
-        stop("penalty.factor must be of length equal to the number of columns in x")
+    if (missing(penalty.factor)) {
+        penalty.factor <- numeric(0)
+    } else {
+        if (length(penalty.factor) != p) {
+            stop("penalty.factor must be same length as number of columns in x")
+        }
     }
     
     lambda_val = sort(as.numeric(lambda), decreasing = TRUE)
@@ -111,6 +126,17 @@ admm.lasso <- function(x,
     if(nlambda[1] <= 0) 
     {
         stop("nlambda must be a positive integer")
+    }
+    
+    if (length(alpha) > 1)
+    {
+        alpha <- alpha[1]
+        warning("Only one alpha at a time for now")
+    }
+    
+    if (alpha > 1 | alpha < 0)
+    {
+        stop("alpha must be between 0 and 1")
     }
     
     if(is.null(lambda.min.ratio))
@@ -144,29 +170,22 @@ admm.lasso <- function(x,
         stop("rho should be positive")
     }
     
-    maxit      <- as.integer(maxit)
-    irls.maxit <- as.integer(irls.maxit)
-    irls.tol   <- as.numeric(irls.tol)
-    abs.tol    <- as.numeric(abs.tol)
-    abs.tol    <- as.numeric(abs.tol)
-    rel.tol    <- as.numeric(rel.tol)
-    rho        <- if(is.null(rho))  -1.0  else  as.numeric(rho)
+    maxit   <- as.integer(maxit)
+    abs.tol <- as.numeric(abs.tol)
+    rel.tol <- as.numeric(rel.tol)
+    rho     <- if(is.null(rho))  -1.0  else  as.numeric(rho)
     
-    res <- .Call("admm_lasso", 
-                 x, y, 
-                 family,
+    res <- .Call("admm_sparse_genridge", 
+                 x, y, D, 
                  lambda,
-                 nlambda, 
-                 lambda.min.ratio,
                  penalty.factor,
-                 standardize, 
-                 intercept,
-                 list(maxit      = maxit,
-                      eps_abs    = abs.tol,
-                      eps_rel    = rel.tol,
-                      irls_maxit = irls.maxit,
-                      irls_tol   = irls.tol,
-                      rho        = rho),
+                 alpha,
+                 nlambda, lambda.min.ratio,
+                 standardize, intercept,
+                 list(maxit   = maxit,
+                      eps_abs = abs.tol,
+                      eps_rel = rel.tol,
+                      rho     = rho),
                  PACKAGE = "penreg")
     res
 }

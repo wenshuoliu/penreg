@@ -43,6 +43,7 @@ protected:
     Scalar lambda;                // L1 penalty
     Scalar lambda0;               // minimum lambda to make coefficients all zero
     bool rho_unspecified;         // was rho unspecified? if so, we must set it
+    ArrayXd penalty_factor;       // penalty multiplication factors 
 
     int iter_counter;             // which iteration are we in?
 
@@ -53,45 +54,47 @@ protected:
 #endif
 
     // x -> Ax
-    void A_mult(Vector &res, SparseVector &x)
+    void A_mult(Vector &res, SparseVector &beta)
     {
-        res.noalias() = datX * x;
+        res.noalias() = datX * beta;
     }
     // y -> A'y
-    void At_mult(Vector &res, Vector &y)
+    void At_mult(Vector &res, Vector &nu)
     {
-        res.noalias() = datX.transpose() * y;
+        res.noalias() = datX.transpose() * nu;
     }
     // z -> Bz
-    void B_mult(Vector &res, Vector &z)
+    void B_mult(Vector &res, Vector &gamma)
     {
-        res.swap(z);
+        res.swap(gamma);
     }
     // ||c||_2
     double c_norm() { return 0.0; }
 
-    static void soft_threshold(SparseVector &res, const Vector &vec, const double &penalty)
+static void soft_threshold(SparseVector &res, const Vector &vec, const double &penalty, const Vector &pen_fact)
+{
+    int v_size = vec.size();
+    res.setZero();
+    res.reserve(v_size);
+    
+    const double *ptr = vec.data();
+    for(int i = 0; i < v_size; i++)
     {
-        int v_size = vec.size();
-        res.setZero();
-        res.reserve(v_size);
-
-        const double *ptr = vec.data();
-        for(int i = 0; i < v_size; i++)
-        {
-            if(ptr[i] > penalty)
-                res.insertBack(i) = ptr[i] - penalty;
-            else if(ptr[i] < -penalty)
-                res.insertBack(i) = ptr[i] + penalty;
-        }
+        double total_pen = pen_fact(i) * penalty;
+        
+        if(ptr[i] > total_pen)
+            res.insertBack(i) = ptr[i] - total_pen;
+        else if(ptr[i] < -total_pen)
+            res.insertBack(i) = ptr[i] + total_pen;
     }
+}
 
-    virtual void active_set_update(SparseVector &res)
+    virtual void active_set_update(SparseVector &res, const Vector &pen_fact)
     {
         const double gamma = sprad;
         const double penalty = lambda / (rho * gamma);
-        tmp.noalias() = (cache_Ax + aux_z + dual_y / Double(rho)) / gamma;
-        res = main_x;
+        tmp.noalias() = (cache_Ax + aux_gamma + dual_nu / Double(rho)) / gamma;
+        res = main_beta;
 
         double *val_ptr = res.valuePtr();
         const int *ind_ptr = res.innerIndexPtr();
@@ -109,10 +112,12 @@ protected:
             const double val = val_ptr[i] - tmp.dot(datX.col(ind_ptr[i]));
 #endif
 
-            if(val > penalty)
-                val_ptr[i] = val - penalty;
-            else if(val < -penalty)
-                val_ptr[i] = val + penalty;
+            double total_pen = pen_fact(i) * penalty;
+
+            if(val > total_pen)
+                val_ptr[i] = val - total_pen;
+            else if(val < -total_pen)
+                val_ptr[i] = val + total_pen;
             else
                 val_ptr[i] = 0.0;
         }
@@ -129,7 +134,7 @@ protected:
         return x & 0x55555555;
     }
 
-    virtual void next_x(SparseVector &res)
+    virtual void next_beta(SparseVector &res)
     {
         if(lambda > lambda0 - 1e-5)
         {
@@ -141,7 +146,7 @@ protected:
         if(is_regular_update(iter_counter))
         {
             const double gamma = sprad;
-            tmp.noalias() = cache_Ax + aux_z + dual_y / Double(rho);
+            tmp.noalias() = cache_Ax + aux_gamma + dual_nu / Double(rho);
             Vector vec(dim_main);
 #ifdef __AVX__
             vtrX.trans_mult_vec(tmp, vec.data());
@@ -149,53 +154,57 @@ protected:
 #else
             vec.noalias() = -datX.transpose() * tmp / gamma;
 #endif
-            vec += main_x;
-            soft_threshold(res, vec, lambda / (rho * gamma));
+            vec += main_beta;
+            soft_threshold(res, vec, lambda / (rho * gamma), penalty_factor);
         } else {
-            active_set_update(res);
+            active_set_update(res, penalty_factor);
         }
         iter_counter++;
     }
-    void next_z(Vector &res)
+    void next_gamma(Vector &res)
     {
 #ifdef __AVX__
-        vtrX.mult_spvec(main_x, cache_Ax.data());
+        vtrX.mult_spvec(main_beta, cache_Ax.data());
 #else
-        cache_Ax.noalias() = datX * main_x;
+        cache_Ax.noalias() = datX * main_beta;
 #endif
 
-        res.noalias() = (datY + dual_y + Double(rho) * cache_Ax) / Double(-1 - rho);
+        res.noalias() = (datY + dual_nu + Double(rho) * cache_Ax) / Double(-1 - rho);
     }
     void next_residual(Vector &res)
     {
-        // res.noalias() = cache_Ax + aux_z;
-        std::transform(cache_Ax.data(), cache_Ax.data() + dim_dual, aux_z.data(), res.data(), std::plus<double>());
+        // res.noalias() = cache_Ax + aux_gamma;
+        std::transform(cache_Ax.data(), cache_Ax.data() + dim_dual, aux_gamma.data(), res.data(), std::plus<double>());
     }
     void rho_changed_action() {}
 
     // Faster computation of epsilons and residuals
     double compute_eps_primal()
     {
-        double r = std::max(cache_Ax.norm(), aux_z.norm());
+        double r = std::max(cache_Ax.norm(), aux_gamma.norm());
         return r * eps_rel + std::sqrt(double(dim_dual)) * eps_abs;
     }
     double compute_eps_dual()
     {
-        return std::sqrt(sprad) * dual_y.norm() * eps_rel + std::sqrt(double(dim_main)) * eps_abs;
+        return std::sqrt(sprad) * dual_nu.norm() * eps_rel + std::sqrt(double(dim_main)) * eps_abs;
     }
-    double compute_resid_dual(const Vector &new_z)
+    double compute_resid_dual(const Vector &new_gamma)
     {
-        return rho * std::sqrt(sprad) * (new_z - aux_z).norm();
+        return rho * std::sqrt(sprad) * (new_gamma - aux_gamma).norm();
     }
 
 public:
-    ADMMLassoWide(ConstGenericMatrix &datX_, ConstGenericVector &datY_,
+    ADMMLassoWide(ConstGenericMatrix &datX_, 
+                  ConstGenericVector &datY_,
+                  ArrayXd &penalty_factor_,
                   double eps_abs_ = 1e-6,
                   double eps_rel_ = 1e-6) :
-        ADMMBase(datX_.cols(), datX_.rows(), datX_.rows(),
+        ADMMBase<Eigen::SparseVector<double>, Eigen::VectorXd, Eigen::VectorXd>
+                 (datX_.cols(), datX_.rows(), datX_.rows(),
                  eps_abs_, eps_rel_),
         datX(datX_.data(), datX_.rows(), datX_.cols()),
         datY(datY_.data(), datY_.size()),
+        penalty_factor(penalty_factor_),
         lambda0((datX.transpose() * datY).cwiseAbs().maxCoeff()),
         cache_Ax(dim_dual), tmp(dim_dual)
     {
@@ -220,10 +229,10 @@ public:
     // init() is a cold start for the first lambda
     void init(double lambda_, double rho_)
     {
-        main_x.setZero();
+        main_beta.setZero();
         cache_Ax.setZero();
-        aux_z.setZero();
-        dual_y.setZero();
+        aux_gamma.setZero();
+        dual_nu.setZero();
 
         lambda = lambda_;
         rho = rho_;
@@ -246,7 +255,7 @@ public:
         rho_changed_action();
     }
     // when computing for the next lambda, we can use the
-    // current main_x, aux_z, dual_y and rho as initial values
+    // current main_beta, aux_gamma, dual_nu and rho as initial values
     void init_warm(double lambda_, int iternum)
     {
         lambda = lambda_;

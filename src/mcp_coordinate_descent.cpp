@@ -1,8 +1,9 @@
 #define EIGEN_DONT_PARALLELIZE
 
-#include "ADMMLassoLogisticTall.h"
-#include "ADMMLassoWide.h"
+
+#include "CoordMCP.h"
 #include "DataStd.h"
+//#include <boost/tuple/tuple.hpp>
 
 using Eigen::MatrixXf;
 using Eigen::VectorXf;
@@ -34,10 +35,16 @@ inline void write_beta_matrix(SpMat &betas, int col, double beta0, SpVec &coef)
     }
 }
 
-RcppExport SEXP admm_lasso_logistic(SEXP x_, SEXP y_, SEXP lambda_,
-                                    SEXP nlambda_, SEXP lmin_ratio_,
-                                    SEXP standardize_, SEXP intercept_,
-                                    SEXP opts_)
+RcppExport SEXP coord_mcp(SEXP x_, 
+                          SEXP y_, 
+                          SEXP lambda_,
+                          SEXP gamma_,
+                          SEXP penalty_factor_,
+                          SEXP nlambda_, 
+                          SEXP lmin_ratio_,
+                          SEXP standardize_, 
+                          SEXP intercept_,
+                          SEXP opts_)
 {
     BEGIN_RCPP
     
@@ -77,43 +84,31 @@ RcppExport SEXP admm_lasso_logistic(SEXP x_, SEXP y_, SEXP lambda_,
     //   1/2 * ||y - X * beta||^2 + n * lambda * ||beta||_1
     ArrayXd lambda(as<ArrayXd>(lambda_));
     int nlambda = lambda.size();
+    ArrayXd gamma(as<ArrayXd>(gamma_));
+    int ngamma = gamma.size();
+    
+    ArrayXd penalty_factor(as<ArrayXd>(penalty_factor_));
     
     
     List opts(opts_);
     const int maxit        = as<int>(opts["maxit"]);
-    const double eps_abs   = as<double>(opts["eps_abs"]);
-    const double eps_rel   = as<double>(opts["eps_rel"]);
-    const double rho       = as<double>(opts["rho"]);
+    const double tol       = as<double>(opts["tol"]);
     const bool standardize = as<bool>(standardize_);
     const bool intercept   = as<bool>(intercept_);
     
     DataStd<double> datstd(n, p, standardize, intercept);
     datstd.standardize(datX, datY);
     
-    ADMMLassoLogisticTall *solver_tall;
-    ADMMLassoWide *solver_wide;
+    CoordMCP *solver;
+    solver = new CoordMCP(datX, datY, penalty_factor, tol);
     
-    if(n > p)
-    {
-        solver_tall = new ADMMLassoLogisticTall(datX, datY, eps_abs, eps_rel);
-    } else
-    {
-        solver_wide = new ADMMLassoWide(datX, datY, eps_abs, eps_rel);
-    }
     
     
     if (nlambda < 1) {
         
         double lmax = 0.0;
+        lmax = solver->get_lambda_zero() / n * datstd.get_scaleY();
         
-        if(n > p) 
-        {
-            lmax = solver_tall->get_lambda_zero() / n * datstd.get_scaleY();
-        } else
-        {
-            lmax = solver_tall->get_lambda_zero() / n * datstd.get_scaleY();
-            lmax = solver_wide->get_lambda_zero() / n * datstd.get_scaleY();
-        }
         double lmin = as<double>(lmin_ratio_) * lmax;
         lambda.setLinSpaced(as<int>(nlambda_), std::log(lmax), std::log(lmin));
         lambda = lambda.exp();
@@ -123,58 +118,59 @@ RcppExport SEXP admm_lasso_logistic(SEXP x_, SEXP y_, SEXP lambda_,
     
     
     
-    SpMat beta(p + 1, nlambda);
-    beta.reserve(Eigen::VectorXi::Constant(nlambda, std::min(n, p)));
+    //SpMat beta(p + 1, nlambda);
+    //beta.reserve(Eigen::VectorXi::Constant(nlambda, std::min(n, p)));
     
-    IntegerVector niter(nlambda);
+    std::vector<IntegerVector> niters(ngamma);
+    
+    //std::vector<boost::tuple<MatrixXd, VectorXd, ArrayXd, double> > coef_results(ngamma);
+    List coef_results(ngamma);
+    
     double ilambda = 0.0;
     
-    for(int i = 0; i < nlambda; i++)
+    
+    for (int g = 0; g < ngamma; g++) // loop over gamma values
     {
-        ilambda = lambda[i] * n / datstd.get_scaleY();
-        if(n > p)
+        MatrixXd beta(p, nlambda);
+        VectorXd intercepts(nlambda);
+        IntegerVector niter(nlambda);
+        for(int i = 0; i < nlambda; i++) // loop over lambda values
         {
-            if(i == 0)
-                solver_tall->init(ilambda, rho);
-            else
-                solver_tall->init_warm(ilambda);
-            
-            niter[i] = solver_tall->solve(maxit);
-            SpVec res = solver_tall->get_z();
-            double beta0 = 0.0;
-            datstd.recover(beta0, res);
-            write_beta_matrix(beta, i, beta0, res);
-        } else {
+            ilambda = lambda[i] * n / datstd.get_scaleY();
             
             if(i == 0)
-                solver_wide->init(ilambda, rho);
+                solver->init(ilambda, gamma[g]);
             else
-                solver_wide->init_warm(ilambda, i);
+                solver->init_warm(ilambda, gamma[g]);
             
-            niter[i] = solver_wide->solve(maxit);
-            SpVec res = solver_wide->get_x();
+            niter[i] = solver->solve(maxit);
+            VectorXd res = solver->get_beta();
             double beta0 = 0.0;
             datstd.recover(beta0, res);
-            write_beta_matrix(beta, i, beta0, res);
+            intercepts(i) = beta0;
+            beta.block(0, i, p, 1) = res;
+            //write_beta_matrix(beta, i, beta0, res);
             
         }
+        niters[g]       = niter;
+        
+        //coef_results[g] = boost::make_tuple(beta, intercepts, lambda, gamma[g]);
+        coef_results[g] = List::create(Named("beta") = beta, 
+                                       Named("intercept") = intercepts, 
+                                       Named("lambda") = lambda, 
+                                       Named("gamma") = gamma[g]);
     }
     
+    delete solver;
     
-    if(n > p) 
-    {
-        delete solver_tall;
-    }
-    else
-    {
-        delete solver_wide;
-    }
+    //beta.makeCompressed();
     
-    beta.makeCompressed();
     
-    return List::create(Named("lambda") = lambda,
-                        Named("beta") = beta,
-                        Named("niter") = niter);
+    return List::create(Named("coefficients") = coef_results,
+                        Named("lambda") = lambda,
+                        Named("gamma") = gamma,
+                        Named("niter") = niters);
     
     END_RCPP
 }
+

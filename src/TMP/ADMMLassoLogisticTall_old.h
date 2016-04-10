@@ -1,11 +1,12 @@
-#ifndef ADMMLASSOTALL_H
-#define ADMMLASSOTALL_H
+#ifndef ADMMLASSOLOGISTICTALL_H
+#define ADMMLASSOLOGISTICTALL_H
 
 #include "FADMMBase.h"
 #include "Linalg/BlasWrapper.h"
 #include "Spectra/SymEigsSolver.h"
 #include "ADMMMatOp.h"
 #include "utils.h"
+#include <Eigen/Geometry>
 
 // minimize  1/2 * ||y - X * beta||^2 + lambda * ||beta||_1
 //
@@ -19,7 +20,7 @@
 // b => y
 // f(x) => 1/2 * ||Ax - b||^2
 // g(z) => lambda * ||z||_1
-class ADMMLassoTall: public FADMMBase<Eigen::VectorXd, Eigen::SparseVector<double>, Eigen::VectorXd>
+class ADMMLassoLogisticTall: public FADMMBase<Eigen::VectorXd, Eigen::SparseVector<double>, Eigen::VectorXd>
 {
 protected:
     typedef float Scalar;
@@ -39,10 +40,10 @@ protected:
     MapVec datY;                  // response vector
     Vector XY;                    // X'Y
     MatrixXd XX;                  // X'X
+    MatrixXd HH;                  // X'WX
     LDLT solver;                  // matrix factorization
     VectorXd savedEigs;           // saved eigenvalues
     bool rho_unspecified;         // was rho unspecified? if so, we must set it
-    ArrayXd penalty_factor;       // penalty multiplication factors 
     
     Scalar lambda;                // L1 penalty
     Scalar lambda0;               // minimum lambda to make coefficients all zero
@@ -60,7 +61,7 @@ protected:
     
     
     
-    static void soft_threshold(SparseVector &res, const Vector &vec, const double &penalty, const Vector &pen_fact)
+    static void soft_threshold(SparseVector &res, const Vector &vec, const double &penalty)
     {
         int v_size = vec.size();
         res.setZero();
@@ -69,33 +70,53 @@ protected:
         const double *ptr = vec.data();
         for(int i = 0; i < v_size; i++)
         {
-            double total_pen = pen_fact(i) * penalty;
-            
-            if(ptr[i] > total_pen)
-                res.insertBack(i) = ptr[i] - total_pen;
-            else if(ptr[i] < -total_pen)
-                res.insertBack(i) = ptr[i] + total_pen;
+            if(ptr[i] > penalty)
+                res.insertBack(i) = ptr[i] - penalty;
+            else if(ptr[i] < -penalty)
+                res.insertBack(i) = ptr[i] + penalty;
         }
     }
-    
     void next_beta(Vector &res)
     {
-        Vector rhs = XY - adj_nu;
-        // rhs += rho * adj_gamma;
         
-        // manual optimization
-        for(SparseVector::InnerIterator iter(adj_gamma); iter; ++iter)
-            rhs[iter.index()] += rho * iter.value();
+        res = main_beta;
+        //LDLT solver_logreg;
+        int maxit_newton = 100;
+        double tol_newton = 1e-5;
         
-        res.noalias() = solver.solve(rhs);
+        for (int i = 0; i < maxit_newton; ++i)
+        {
+            // calculate gradient
+            
+            VectorXd prob = 1 / (1 + (-1 * (datX * res).array()).exp().array());
+            
+            VectorXd grad = (-1 * XY.array()).array() + (datX.adjoint() * prob).array() + 
+                adj_nu.array() + (rho * res.array()).array();
+            
+            
+            for(SparseVector::InnerIterator iter(adj_gamma); iter; ++iter)
+                grad[iter.index()] -= rho * iter.value();
+            
+            //calculate Jacobian
+            VectorXd W = prob.array() * (1 - prob.array());
+            HH = XtWX(datX, W);
+            HH.diagonal().array() += rho;
+            
+            VectorXd dx = HH.ldlt().solve(grad);
+            res.noalias() -= dx;
+            if (std::abs(grad.adjoint() * dx) < tol_newton)
+            {
+                //std::cout << "iters:\n" << i+1 << std::endl;
+                break;
+            }
+        }
+        
     }
-    
     virtual void next_gamma(SparseVector &res)
     {
         Vector vec = main_beta + adj_nu / rho;
-        soft_threshold(res, vec, lambda / rho, penalty_factor);
+        soft_threshold(res, vec, lambda / rho);
     }
-    
     void next_residual(Vector &res)
     {
         // res = main_beta;
@@ -108,13 +129,14 @@ protected:
     }
     void rho_changed_action() 
     {
-        MatrixXd matToSolve(XX);
-        matToSolve.diagonal().array() += rho;
+        //MatrixXd matToSolve(XX);
+        //matToSolve.diagonal().array() += rho;
         
-        // precompute LLT decomposition of (X'X + rho * I)
-        solver.compute(matToSolve.selfadjointView<Eigen::Lower>());
+        //// precompute LLT decomposition of (X'X + rho * I)
+        //solver.compute(matToSolve.selfadjointView<Eigen::Lower>());
     }
     //void update_rho() {}
+    
     
     
     // Calculate ||v1 - v2||^2 when v1 and v2 are sparse
@@ -180,26 +202,23 @@ protected:
     }
     
 public:
-    ADMMLassoTall(ConstGenericMatrix &datX_, 
-                  ConstGenericVector &datY_,
-                  ArrayXd &penalty_factor_,
-                  double eps_abs_ = 1e-6,
-                  double eps_rel_ = 1e-6) :
+    ADMMLassoLogisticTall(ConstGenericMatrix &datX_, ConstGenericVector &datY_,
+                          double eps_abs_ = 1e-6,
+                          double eps_rel_ = 1e-6) :
     FADMMBase<Eigen::VectorXd, Eigen::SparseVector<double>, Eigen::VectorXd>
-               (datX_.cols(), datX_.cols(), datX_.cols(),
+             (datX_.cols(), datX_.cols(), datX_.cols(),
               eps_abs_, eps_rel_),
               datX(datX_.data(), datX_.rows(), datX_.cols()),
               datY(datY_.data(), datY_.size()),
-              penalty_factor(penalty_factor_),
               XY(datX.transpose() * datY),
               XX(XtX(datX)),
               lambda0(XY.cwiseAbs().maxCoeff())
     {}
     
-    double get_lambda_zero() const { return lambda0; }
+    virtual double get_lambda_zero() const { return lambda0; }
     
     // init() is a cold start for the first lambda
-    void init(double lambda_, double rho_)
+    virtual void init(double lambda_, double rho_)
     {
         main_beta.setZero();
         aux_gamma.setZero();
@@ -217,6 +236,7 @@ public:
         
         if(rho <= 0)
         {
+            rho_unspecified = true;
             MatOpSymLower<Double> op(XX);
             Spectra::SymEigsSolver< Double, Spectra::LARGEST_ALGE, MatOpSymLower<Double> > eigs(&op, 1, 3);
             srand(0);
@@ -224,7 +244,12 @@ public:
             eigs.compute(100, 0.1);
             savedEigs = eigs.eigenvalues();
             rho = std::pow(savedEigs[0], 1.0 / 3) * std::pow(lambda, 2.0 / 3);
+        } else 
+        {
+            rho_unspecified = false;
         }
+        
+        //XX.diagonal().array() += rho;
         
         //XX.diagonal().array() += rho;
         //solver.compute(XX.selfadjointView<Eigen::Lower>());
@@ -241,9 +266,20 @@ public:
     }
     // when computing for the next lambda, we can use the
     // current main_beta, aux_gamma, dual_nu and rho as initial values
-    void init_warm(double lambda_)
+    virtual void init_warm(double lambda_)
     {
         lambda = lambda_;
+        
+        if (rho_unspecified)
+        {
+            MatOpSymLower<Double> op(XX);
+            Spectra::SymEigsSolver< Double, Spectra::LARGEST_ALGE, MatOpSymLower<Double> > eigs(&op, 1, 3);
+            srand(0);
+            eigs.init();
+            eigs.compute(100, 0.1);
+            savedEigs = eigs.eigenvalues();
+            rho = std::pow(savedEigs[0], 1.0 / 3) * std::pow(lambda, 2.0 / 3);
+        }
         
         eps_primal = 0.0;
         eps_dual = 0.0;
@@ -257,4 +293,4 @@ public:
 
 
 
-#endif // ADMMLASSOTALL_H
+#endif // ADMMLASSOLOGISTICTALL_H

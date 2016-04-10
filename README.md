@@ -40,15 +40,15 @@ or by cloning and building
 
 * Incorporate weighting of observations for lasso and genlasso
 
-* Incorporate a penalty factor multiplier which is a vector multiplied by the tuning parameter value so that individual variables can have their penalty upweighted, downweighted, or not penalized at all. Could also be used for adaptive lasso, etc
+* Incorporate a penalty factor multiplier (for all the methods. currently complete for coord mcp and admm lasso) which is a vector multiplied by the tuning parameter value so that individual variables can have their penalty upweighted, downweighted, or not penalized at all. Could also be used for adaptive lasso, etc
+
+* complete different families for all methods
 
 * Make automatic rho choice better in terms of convergence
 
-* Add code to make rho possibly update every 40th iteration
+* After the above are complete, work on group lasso 
 
-* CHANGE C++ VARIABLE NAMING CONVENTIONS (so the code is more readable)
-
-* After the above are complete, work on group lasso then overlapping group lasso
+* make the block soft thresholding function more efficient
 
 ## Code Structure
 
@@ -83,44 +83,72 @@ library(glmnet)
 library(penreg)
 set.seed(123)
 n <- 100
-p <- 20
+p <- 10
 m <- 5
 b <- matrix(c(runif(m), rep(0, p - m)))
 x <- matrix(rnorm(n * p, mean = 1.2, sd = 2), n, p)
 y <- 5 + x %*% b + rnorm(n)
 
-fit         <- glmnet(x, y)
+fit         <- glmnet(x, y, thresh = 1e-10, standardize = FALSE)
 glmnet_coef <- coef(fit)[,floor(length(fit$lambda/2))]
-admm.res    <- admm.lasso(x, y, standardize = TRUE, intercept = TRUE)
+admm.res    <- admm.lasso(x, y, standardize = FALSE, intercept = TRUE, 
+                          lambda = fit$lambda, abs.tol = 1e-8, rel.tol = 1e-8)
 admm_coef   <- admm.res$beta[,floor(length(fit$lambda/2))]
 
 data.frame(glmnet = as.numeric(glmnet_coef),
-           admm = as.numeric(admm_coef))
+           admm   = as.numeric(admm_coef))
 ```
 
 ```
-##          glmnet         admm
-## 1   4.834825143  4.834735039
-## 2   0.228618029  0.228583677
-## 3   0.756501047  0.756511096
-## 4   0.358817744  0.358804998
-## 5   0.913800321  0.913823158
-## 6   0.915407255  0.915382516
-## 7   0.088653244  0.088682434
-## 8   0.061140996  0.061197137
-## 9   0.010692602  0.010686573
-## 10  0.097466364  0.097516580
-## 11  0.078353614  0.078398380
-## 12 -0.045029900 -0.045067442
-## 13 -0.069797582 -0.069846894
-## 14  0.014974835  0.014971714
-## 15  0.120619724  0.120626022
-## 16 -0.037505776 -0.037514091
-## 17  0.015485915  0.015507724
-## 18  0.042620239  0.042638073
-## 19 -0.017761281 -0.017798186
-## 20 -0.027074881 -0.027043449
-## 21 -0.006174798 -0.006179665
+##         glmnet        admm
+## 1   4.82478472  4.82478467
+## 2   0.21479611  0.21479630
+## 3   0.80214687  0.80214691
+## 4   0.41866035  0.41866057
+## 5   0.96235001  0.96234996
+## 6   0.83101295  0.83101306
+## 7  -0.01913640 -0.01913657
+## 8   0.05623805  0.05623766
+## 9  -0.09109605 -0.09109590
+## 10  0.12805350  0.12805339
+## 11  0.02799320  0.02799327
+```
+
+### Lasso (logistic regression)
+
+```r
+library(glmnet)
+library(penreg)
+set.seed(123)
+n <- 100
+p <- 10
+m <- 5
+b <- matrix(c(runif(m, min = -0.1, max = 0.1), rep(0, p - m)))
+x <- matrix(rnorm(n * p, mean = 1.2, sd = 2), n, p)
+y <- rbinom(n, 1, prob = 1 / (1 + exp(-x %*% b)))
+
+fit         <- glmnet(x, y, family = "binomial", standardize = FALSE, thresh = 1e-12)
+glmnet_coef <- coef(fit)[,floor(length(fit$lambda/2))]
+admm.res    <- admm.lasso(x, y, intercept = TRUE, family = "binomial", lambda = fit$lambda, irls.tol = 1e-8)
+admm_coef   <- admm.res$beta[,floor(length(fit$lambda/2))]
+
+data.frame(glmnet = as.numeric(glmnet_coef),
+           admm   = as.numeric(admm_coef))
+```
+
+```
+##          glmnet        admm
+## 1  -0.387291651 -0.38730951
+## 2  -0.126237875 -0.12623663
+## 3   0.215399880  0.21540136
+## 4   0.002287391  0.00228826
+## 5   0.068306065  0.06830715
+## 6   0.079371247  0.07937165
+## 7  -0.107363235 -0.10736164
+## 8   0.085989643  0.08599049
+## 9   0.046324036  0.04632551
+## 10  0.047907553  0.04790905
+## 11  0.088285296  0.08828688
 ```
 
 ## Performance
@@ -139,7 +167,7 @@ p <- 500
 m <- 50
 b <- matrix(c(runif(m), rep(0, p - m)))
 x <- matrix(rnorm(n * p, sd = 3), n, p)
-y <- x %*% b + rnorm(n)
+y <- drop(x %*% b) + rnorm(n)
 
 lambdas = glmnet(x, y)$lambda
 
@@ -148,18 +176,23 @@ microbenchmark(
     "admm[lasso]"   = {res2 <- admm.lasso(x, y, lambda = lambdas, 
                                           intercept = TRUE, standardize = TRUE,
                                           abs.tol = 1e-8, rel.tol = 1e-8)},
+    "cd[lasso]"     = {res3 <- cd.lasso(x, y, lambda = lambdas, 
+                                        intercept = TRUE, standardize = TRUE,
+                                        tol = 1e-5)},
     times = 5
 )
 ```
 
 ```
 ## Unit: milliseconds
-##           expr      min       lq     mean   median       uq      max neval
-##  glmnet[lasso] 877.3851 924.8473 927.9810 934.3748 937.4798 965.8181     5
-##    admm[lasso] 644.4346 648.0484 669.1382 656.2429 679.4984 717.4669     5
-##  cld
-##    b
-##   a
+##           expr       min        lq      mean    median        uq       max
+##  glmnet[lasso]  899.7733  908.0236  921.3106  908.0504  909.6120  981.0936
+##    admm[lasso]  675.5999  681.5730  699.6475  700.4277  705.3199  735.3170
+##      cd[lasso] 1644.9993 1651.2834 1710.7607 1689.4881 1723.4230 1844.6095
+##  neval cld
+##      5  b 
+##      5 a  
+##      5   c
 ```
 
 ```r
@@ -168,7 +201,68 @@ max(abs(coef(res1) - res2$beta))
 ```
 
 ```
-## [1] 6.600234e-07
+## [1] 6.609837e-07
+```
+
+```r
+max(abs(coef(res1) - res3$beta))
+```
+
+```
+## [1] 6.848958e-07
+```
+
+```r
+max(abs(res2$beta - res3$beta))
+```
+
+```
+## [1] 8.204803e-08
+```
+
+```r
+set.seed(123)
+n <- 10000
+p <- 100
+m <- 25
+b <- matrix(c(runif(m), rep(0, p - m)))
+x <- matrix(rnorm(n * p, sd = 3), n, p)
+
+## Logistic Regression
+y <- rbinom(n, 1, prob = 1 / (1 + exp(-x %*% b)))
+
+lambdas = glmnet(x, y, family = "binomial")$lambda
+
+microbenchmark(
+    "glmnet[lasso]" = {res1 <- glmnet(x, y, thresh = 1e-11, standardize = FALSE, 
+                                      lambda = lambdas, 
+                                      family = "binomial")}, # thresh must be very low for glmnet to be accurate
+    "admm[lasso]"   = {res2 <- admm.lasso(x, y, lambda = lambdas, 
+                                          family = "binomial",
+                                          intercept = TRUE, standardize = FALSE,
+                                          irls.tol = 1e-6,
+                                          abs.tol = 1e-6, rel.tol = 1e-6)},
+    times = 5
+)
+```
+
+```
+## Unit: seconds
+##           expr      min       lq     mean   median       uq       max
+##  glmnet[lasso] 9.153600 9.218419 9.704175 9.243971 9.768545 11.136340
+##    admm[lasso] 7.802485 7.938068 8.165284 8.202543 8.433374  8.449947
+##  neval cld
+##      5   b
+##      5  a
+```
+
+```r
+# difference of results (admm is actually quite a bit more precise than glmnet here)
+max(abs(coef(res1) - res2$beta))
+```
+
+```
+## [1] 6.657e-05
 ```
 
 ```r
@@ -176,18 +270,18 @@ mean(abs(coef(res1) - res2$beta))
 ```
 
 ```
-## [1] 5.104183e-09
+## [1] 4.736351e-06
 ```
 
 ```r
 # p > n
 set.seed(123)
-n <- 1000
-p <- 2000
+n <- 200
+p <- 400
 m <- 100
 b <- matrix(c(runif(m), rep(0, p - m)))
 x <- matrix(rnorm(n * p, sd = 2), n, p)
-y <- x %*% b + rnorm(n)
+y <- drop(x %*% b) + rnorm(n)
 
 lambdas = glmnet(x, y)$lambda
 
@@ -196,6 +290,9 @@ microbenchmark(
     "admm[lasso]"   = {res2 <- admm.lasso(x, y, lambda = lambdas, 
                                           intercept = TRUE, standardize = TRUE,
                                           abs.tol = 1e-9, rel.tol = 1e-9)},
+    "cd[lasso]"     = {res3 <- cd.lasso(x, y, lambda = lambdas, 
+                                        intercept = TRUE, standardize = TRUE,
+                                        tol = 1e-5)},
     times = 5
 )
 ```
@@ -203,11 +300,13 @@ microbenchmark(
 ```
 ## Unit: milliseconds
 ##           expr       min        lq      mean    median        uq       max
-##  glmnet[lasso]  817.5585  818.0046  826.8458  825.4685  828.7929  844.4044
-##    admm[lasso] 2314.5491 2315.1116 2325.6514 2328.0003 2330.2637 2340.3324
+##  glmnet[lasso]  785.5918  793.0325  805.3263  802.1128  810.0524  835.8421
+##    admm[lasso] 4497.1962 4570.2749 4613.4047 4582.3039 4637.2231 4780.0253
+##      cd[lasso] 1486.8709 1504.2903 1566.8702 1527.9714 1590.3347 1724.8839
 ##  neval cld
-##      5  a 
-##      5   b
+##      5 a  
+##      5   c
+##      5  b
 ```
 
 ```r
@@ -216,15 +315,23 @@ max(abs(coef(res1) - res2$beta))
 ```
 
 ```
-## [1] 1.307248e-06
+## [1] 7.220397e-05
 ```
 
 ```r
-mean(abs(coef(res1) - res2$beta))
+max(abs(coef(res1) - res3$beta))
 ```
 
 ```
-## [1] 5.714507e-09
+## [1] 7.273356e-05
+```
+
+```r
+max(abs(res2$beta - res3$beta))
+```
+
+```
+## [1] 1.897986e-05
 ```
 
 ```r
@@ -232,19 +339,26 @@ mean(abs(coef(res1) - res2$beta))
 # ADMM is clearly not well-suited for this setting
 set.seed(123)
 n <- 100
-p <- 2000
+p <- 1000
 m <- 10
 b <- matrix(c(runif(m), rep(0, p - m)))
 x <- matrix(rnorm(n * p, sd = 2), n, p)
-y <- x %*% b + rnorm(n)
+y <- drop(x %*% b) + rnorm(n)
 
-lambdas = glmnet(x, y)$lambda
+lambdas = glmnet(x, y, standardize = FALSE)$lambda
 
+# the glmnet threshold criterion had to be made extremely
+# small for it not to have some coefficents which were poorly
+# converged
 microbenchmark(
-    "glmnet[lasso]" = {res1 <- glmnet(x, y, thresh = 1e-12)},
+    "glmnet[lasso]" = {res1 <- glmnet(x, y, thresh = 1e-16, lambda = lambdas,
+                                      standardize = FALSE)},
     "admm[lasso]"   = {res2 <- admm.lasso(x, y, lambda = lambdas, 
-                                          intercept = TRUE, standardize = TRUE,
-                                          abs.tol = 1e-9, rel.tol = 1e-9)},
+                                          intercept = TRUE, standardize = FALSE,
+                                          abs.tol = 1e-8, rel.tol = 1e-8)},
+    "cd[lasso]"     = {res3 <- cd.lasso(x, y, lambda = lambdas, 
+                                        intercept = TRUE, standardize = FALSE,
+                                        tol = 1e-5)},
     times = 5
 )
 ```
@@ -252,11 +366,13 @@ microbenchmark(
 ```
 ## Unit: milliseconds
 ##           expr       min        lq      mean    median        uq       max
-##  glmnet[lasso]  131.9178  136.7224  136.5627  136.7292  137.9485  139.4954
-##    admm[lasso] 8347.6163 8358.6213 8443.3099 8378.4209 8509.5887 8622.3022
+##  glmnet[lasso]  210.5572  220.2147  222.9123  221.6325  228.9390  233.2179
+##    admm[lasso] 2418.7377 2451.2284 2473.5513 2451.3488 2506.8122 2539.6293
+##      cd[lasso]  768.6828  778.6817  785.3402  783.1453  787.8998  808.2915
 ##  neval cld
-##      5  a 
-##      5   b
+##      5 a  
+##      5   c
+##      5  b
 ```
 
 ```r
@@ -265,7 +381,7 @@ max(abs(coef(res1) - res2$beta))
 ```
 
 ```
-## [1] 0.0001883393
+## [1] 1.524573e-05
 ```
 
 ```r
@@ -273,7 +389,39 @@ mean(abs(coef(res1) - res2$beta))
 ```
 
 ```
-## [1] 4.384709e-07
+## [1] 3.713966e-08
+```
+
+```r
+max(abs(coef(res1) - res3$beta))
+```
+
+```
+## [1] 3.587655e-06
+```
+
+```r
+mean(abs(coef(res1) - res3$beta))
+```
+
+```
+## [1] 6.717902e-09
+```
+
+```r
+max(abs(res2$beta - res3$beta))
+```
+
+```
+## [1] 1.279021e-05
+```
+
+```r
+mean(abs(res2$beta - res3$beta))
+```
+
+```
+## [1] 3.756596e-08
 ```
 
 

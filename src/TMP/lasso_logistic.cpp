@@ -1,12 +1,12 @@
 #define EIGEN_DONT_PARALLELIZE
 
-#include "ADMMGenLassoTall.h"
-//#include "ADMMGenLassoWide.h"
+#include "ADMMLassoLogisticTall.h"
+#include "ADMMLassoWide.h"
 #include "DataStd.h"
 
 using Eigen::MatrixXf;
-using Eigen::MatrixXd;
 using Eigen::VectorXf;
+using Eigen::MatrixXd;
 using Eigen::VectorXd;
 using Eigen::ArrayXf;
 using Eigen::ArrayXd;
@@ -21,9 +21,6 @@ using Rcpp::IntegerVector;
 
 typedef Map<VectorXd> MapVecd;
 typedef Map<Eigen::MatrixXd> MapMatd;
-typedef Eigen::MappedSparseMatrix<double> MSpMat;
-typedef Eigen::SparseVector<float> SpVecf;
-typedef Eigen::SparseMatrix<float> SpMatf;
 typedef Eigen::SparseVector<double> SpVec;
 typedef Eigen::SparseMatrix<double> SpMat;
 
@@ -37,20 +34,16 @@ inline void write_beta_matrix(SpMat &betas, int col, double beta0, SpVec &coef)
     }
 }
 
-RcppExport SEXP admm_genlasso(SEXP x_, 
-                              SEXP y_, 
-                              SEXP D_,
-                              SEXP lambda_,
-                              SEXP nlambda_, 
-                              SEXP lmin_ratio_,
-                              SEXP standardize_, 
-                              SEXP intercept_,
-                              SEXP opts_)
+RcppExport SEXP admm_lasso_logistic(SEXP x_, SEXP y_, SEXP lambda_,
+                                    SEXP nlambda_, SEXP lmin_ratio_,
+                                    SEXP standardize_, SEXP intercept_,
+                                    SEXP opts_)
 {
     BEGIN_RCPP
     
     //Rcpp::NumericMatrix xx(x_);
     //Rcpp::NumericVector yy(y_);
+    
     
     Rcpp::NumericMatrix xx(x_);
     Rcpp::NumericVector yy(y_);
@@ -71,10 +64,6 @@ RcppExport SEXP admm_genlasso(SEXP x_,
     //const int n = datX.rows();
     //const int p = datX.cols();
     
-    const SpMat D(as<MSpMat>(D_));
-    
-    const int M = D.rows();
-    
     //MatrixXf datX(n, p);
     //VectorXf datY(n);
     
@@ -89,6 +78,7 @@ RcppExport SEXP admm_genlasso(SEXP x_,
     ArrayXd lambda(as<ArrayXd>(lambda_));
     int nlambda = lambda.size();
     
+    
     List opts(opts_);
     const int maxit        = as<int>(opts["maxit"]);
     const double eps_abs   = as<double>(opts["eps_abs"]);
@@ -100,40 +90,41 @@ RcppExport SEXP admm_genlasso(SEXP x_,
     DataStd<double> datstd(n, p, standardize, intercept);
     datstd.standardize(datX, datY);
     
-    ADMMGenLassoTall *solver_tall;
-    //ADMMGenLassoWide *solver_wide;
+    ADMMLassoLogisticTall *solver_tall;
+    ADMMLassoWide *solver_wide;
     
     if(n > p)
     {
-        solver_tall = new ADMMGenLassoTall(datX, datY, D, eps_abs, eps_rel);
-    }
-    else
+        solver_tall = new ADMMLassoLogisticTall(datX, datY, eps_abs, eps_rel);
+    } else
     {
-        //solver_wide = new ADMMGenLassoWide(datX, datY, eps_abs, eps_rel);
+        solver_wide = new ADMMLassoWide(datX, datY, eps_abs, eps_rel);
     }
     
-    if(nlambda < 1)
-    {
+    
+    if (nlambda < 1) {
+        
         double lmax = 0.0;
-        if(n > p)
+        
+        if(n > p) 
         {
             lmax = solver_tall->get_lambda_zero() / n * datstd.get_scaleY();
-        }
-        else
+        } else
         {
             lmax = solver_tall->get_lambda_zero() / n * datstd.get_scaleY();
+            lmax = solver_wide->get_lambda_zero() / n * datstd.get_scaleY();
         }
-            //lmax = solver_wide->get_lambda_zero() / n * datstd.get_scaleY();
         double lmin = as<double>(lmin_ratio_) * lmax;
         lambda.setLinSpaced(as<int>(nlambda_), std::log(lmax), std::log(lmin));
         lambda = lambda.exp();
         nlambda = lambda.size();
     }
     
-    MatrixXd beta(p + 1, nlambda);
-    SpMat beta_aug(M + 1, nlambda);
-    //beta.reserve(Eigen::VectorXi::Constant(nlambda, std::min(n, p)));
-    beta_aug.reserve(Eigen::VectorXi::Constant(nlambda, std::min(n, M)));
+    
+    
+    
+    SpMat beta(p + 1, nlambda);
+    beta.reserve(Eigen::VectorXi::Constant(nlambda, std::min(n, p)));
     
     IntegerVector niter(nlambda);
     double ilambda = 0.0;
@@ -150,47 +141,40 @@ RcppExport SEXP admm_genlasso(SEXP x_,
             
             niter[i] = solver_tall->solve(maxit);
             SpVec res = solver_tall->get_gamma();
-            VectorXd restrue = solver_tall->get_beta();
-            double beta0 = 0.0;
-            double beta0a = 0.0;
-            datstd.recover(beta0, restrue);
-            datstd.recover(beta0a, res);
-            //write_beta_matrix(beta, i, beta0, restrue);
-            beta(0,i) = beta0;
-            beta.block(1, i, p, 1) = restrue;
-            write_beta_matrix(beta_aug, i, beta0a, res);
-        } else {
-            /*
-            if(i == 0)
-                solver_wide->init(ilambda, rho);
-            else
-                solver_wide->init_warm(ilambda);
-            
-            niter[i] = solver_wide->solve(maxit);
-            SpVec res = solver_wide->get_x();
             double beta0 = 0.0;
             datstd.recover(beta0, res);
             write_beta_matrix(beta, i, beta0, res);
-             */
+        } else {
+            
+            if(i == 0)
+                solver_wide->init(ilambda, rho);
+            else
+                solver_wide->init_warm(ilambda, i);
+            
+            niter[i] = solver_wide->solve(maxit);
+            SpVec res = solver_wide->get_beta();
+            double beta0 = 0.0;
+            datstd.recover(beta0, res);
+            write_beta_matrix(beta, i, beta0, res);
+            
         }
     }
     
-    if(n > p)
+    
+    if(n > p) 
     {
         delete solver_tall;
     }
     else
     {
-        //delete solver_wide;
+        delete solver_wide;
     }
     
-    beta_aug.makeCompressed();
+    beta.makeCompressed();
     
     return List::create(Named("lambda") = lambda,
                         Named("beta") = beta,
-                        Named("beta.aug") = beta_aug,
                         Named("niter") = niter);
     
     END_RCPP
 }
-
